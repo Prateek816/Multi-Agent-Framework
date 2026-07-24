@@ -1,0 +1,79 @@
+framework/
+├── pyproject.toml
+├── README.md
+├── examples/
+│   ├── code_review_agent/
+│   │   ├── config.yaml
+│   │   └── app.py
+│   └── multi_agent_research/
+│       ├── config.yaml
+│       └── app.py
+│
+├── framework/
+│   ├── __init__.py
+│   ├── core/
+│   │   └── framework.py              # Framework — the public entrypoint (.run, .shutdown)
+│   │
+│   ├── config/
+│   │   ├── loader.py                 # ConfigLoader
+│   │   └── schema.py                 # Pydantic models: AgentConfig, WorkflowConfig, etc.
+│   │
+│   ├── agents/
+│   │   ├── base.py                   # BaseAgent
+│   │   ├── factory.py                # AgentFactory
+│   │   └── registry.py               # AgentRegistry
+│   │
+│   ├── tools/
+│   │   ├── registry.py               # ToolRegistry — flat name -> callable
+│   │   ├── bundles.py                # tool_bundles resolution
+│   │   └── builtin/                  # ships in-framework, registered under core.*
+│   │       ├── filesystem.py         # core.filesystem
+│   │       ├── web_search.py         # core.web_search
+│   │       └── python_exec.py        # core.python_exec (optional)
+│   │
+│   ├── mcp/
+│   │   ├── manager.py                # MCPManager — connects external servers
+│   │   ├── client.py                 # transport/connection handling
+│   │   └── internal_server.py        # wraps builtin/ tools as an in-process MCP server → core.*
+│   │
+│   ├── a2a/
+│   │   ├── manager.py                # A2AManager — routes to internal or external transport
+│   │   ├── card.py                   # AgentCard generation per agent
+│   │   ├── transport_internal.py     # in-process fast path (function call, no HTTP)
+│   │   └── transport_external.py     # real A2A over HTTP for outside agents
+│   │
+│   ├── workflow/
+│   │   ├── engine.py                 # compiles workflow config → LangGraph graph
+│   │   └── graph_builder.py
+│   │
+│   ├── orchestrator/
+│   │   └── orchestrator.py           # walks graph, dispatches via AgentRegistry + A2AManager
+│   │
+│   ├── memory/
+│   │   ├── manager.py
+│   │   ├── short_term.py             # per-run scratchpad/state
+│   │   └── long_term.py              # Chroma-backed, optional
+│   │
+│   ├── llm/
+│   │   ├── registry.py
+│   │   └── providers/
+│   │       ├── openai.py
+│   │       ├── gemini.py
+│   │       └── groq.py
+│   │
+│   ├── events/
+│   │   └── bus.py                    # EventBus — logging/monitoring subscribe here
+│   │
+│   └── plugins/
+│       └── loader.py                 # loads custom BaseAgent subclasses
+│
+├── cli/
+│   └── main.py                       # `framework tools list`, `framework run`
+│
+├── tests/
+│   ├── test_agents/
+│   ├── test_mcp/
+│   ├── test_a2a/
+│   └── test_orchestrator/
+│
+└── docs/
