@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from typing import List
+
+from langchain_core.documents import Document
+from langsmith import traceable
+
+logger = logging.getLogger(__name__)
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+
+from core.RAG.BM25 import BM25PersistentStore
+
+
+CHROMA_PATH = "data/chroma"
+BM25_PATH   = "data/bm25_store.pkl"
+
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+
+def chunks_to_documents(chunks: List[dict]) -> List[Document]:
+    docs = []
+    for chunk in chunks:
+        doc_id = str(uuid.uuid4())
+        docs.append(Document(
+            page_content=chunk["content"],
+            metadata={
+                "source":    chunk["source"],
+                "chunk_idx": chunk["chunk_idx"],
+                "id":        doc_id,
+            },
+            id=doc_id,
+        ))
+    return docs
+
+
+def store_in_chroma(documents: List[Document]):
+    if not documents:
+        return
+
+    if os.path.exists(CHROMA_PATH):
+        logger.debug("Adding %d documents to existing Chroma store", len(documents))
+        vectordb = Chroma(
+            persist_directory=CHROMA_PATH,
+            embedding_function=embedding_model,
+        )
+        vectordb.add_documents(documents)
+    else:
+        logger.info("Creating new Chroma store with %d documents", len(documents))
+        Chroma.from_documents(
+            documents=documents,
+            embedding=embedding_model,
+            persist_directory=CHROMA_PATH,
+        )
+
+
+def store_in_bm25(documents: List[Document]):
+    store = BM25PersistentStore(path=BM25_PATH)
+    if os.path.exists(BM25_PATH):
+        logger.debug("Adding %d documents to existing BM25 store", len(documents))
+        store.load()
+        store.add_documents(documents)
+    else:
+        logger.info("Creating new BM25 store with %d documents", len(documents))
+        store.build(documents)
+
+
+@traceable(run_type="chain", name="Ingest Chunks")
+def ingest_chunks(chunks: List[dict]):
+    if not chunks:
+        logger.warning("No chunks to process")
+        return
+    logger.info("Processing %d chunks...", len(chunks))
+    documents = chunks_to_documents(chunks)
+    store_in_chroma(documents)
+    store_in_bm25(documents)
+    logger.info("Ingestion complete: %d chunks stored", len(chunks))
