@@ -8,6 +8,38 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
+# Supported text file extensions for chunking
+SUPPORTED_TEXT_EXTENSIONS = (
+    ".txt", ".md", ".markdown", ".mdown", ".mkd", ".mkdn",
+    ".rst", ".org",
+    ".tex", ".latex", ".ltx", ".bib",
+    ".json", ".jsonl", ".ndjson",
+    ".csv", ".tsv",
+    ".xml", ".xsl", ".xslt", ".xsd", ".dtd",
+    ".html", ".htm", ".xhtml", ".shtml", ".stm", ".htmx",
+    ".css", ".scss", ".sass", ".less", ".styl", ".stylus",
+    ".js", ".jsx", ".mjs", ".cjs",
+    ".ts", ".tsx", ".mts", ".cts",
+    ".java",
+    ".cpp", ".cc", ".cxx", ".c++", ".cp", ".C", ".h", ".hh", ".hpp", ".hxx", ".h++",
+    ".c", ".h",
+    ".cs",
+    ".go",
+    ".rs",
+    ".rb", ".erb", ".erubis",
+    ".py", ".pyw",
+    ".sh", ".bash", ".zsh", ".fish", ".ksh", ".tcsh", ".csh",
+    ".pl", ".pm", ".pod", ".t", ".plx", ".perl",
+    ".php", ".php3", ".php4", ".php5", ".php7", ".phps", ".phpt",
+    ".yaml", ".yml",
+    ".toml",
+    ".ini", ".cfg", ".conf", ".properties",
+    ".env",
+    ".gitignore", ".gitattributes", ".gitkeep",
+    ".editorconfig",
+    ".dockerfile", ".dockerignore",
+)
+
 def chunk_text(
     text: str,
     source: str = "",
@@ -56,6 +88,7 @@ def save_tracking(data):
     with open(TRACKING_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+
 #===============================
 
 def load_corpus_from_directory(directory: str) -> list[dict]:
@@ -68,7 +101,7 @@ def load_corpus_from_directory(directory: str) -> list[dict]:
     updated_tracking = {}
 
     for filename in sorted(os.listdir(directory)):
-        if not filename.lower().endswith((".txt", ".md")):
+        if not filename.lower().endswith(SUPPORTED_TEXT_EXTENSIONS):
             continue
 
         filepath = os.path.join(directory, filename)
