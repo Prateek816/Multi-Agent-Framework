@@ -72,7 +72,6 @@ class AgentConfig(BaseModel):
     """
 
     name: str = ""              # filled in by Config._inject_agent_names, not set directly in YAML
-    type: Optional[str] = None  # plugin class name; None = default agent implementation
     llm: str                    # key into `llms:`
     tools: list[str] = Field(default_factory=list)
 
@@ -95,7 +94,7 @@ class AgentConfig(BaseModel):
         if self.prompt and self.prompt_file:
             raise ValueError(
                 f"Agent '{self.name}': set only one of `prompt` or `prompt_file`, not both."
-            )d
+            )
         return self
 
     def resolve_prompt(self) -> Optional[str]:
@@ -110,27 +109,6 @@ class AgentConfig(BaseModel):
             return path.read_text(encoding="utf-8")
         return None
 
-
-# ---------------------------------------------------------------------------
-# Workflows
-# ---------------------------------------------------------------------------
-
-class WorkflowStepConfig(BaseModel):
-    agent: str
-    next: str    # another agent name, or the literal "end"
-
-
-class WorkflowConfig(BaseModel):
-    steps: list[WorkflowStepConfig]
-
-    @property
-    def entry_agent(self) -> str:
-        """The agent that receives the initial task when this workflow runs."""
-        if not self.steps:
-            raise ValueError("Workflow has no steps.")
-        return self.steps[0].agent
-
-
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -139,29 +117,11 @@ class Config(BaseModel):
     llms: dict[str, LLMConfig]
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     agents: dict[str, AgentConfig]
-    workflows: dict[str, WorkflowConfig]
-    entry_workflow: Optional[str] = None   # which key in `workflows:` runs by default
 
     @model_validator(mode="after")
     def _inject_agent_names(self) -> "Config":
         for name, agent_cfg in self.agents.items():
             agent_cfg.name = name
-        return self
-
-    @model_validator(mode="after")
-    def _resolve_entry_workflow(self) -> "Config":
-        if self.entry_workflow is None:
-            if "default" in self.workflows:
-                self.entry_workflow = "default"
-            elif len(self.workflows) == 1:
-                self.entry_workflow = next(iter(self.workflows))
-            else:
-                raise ValueError(
-                    "Multiple workflows defined but no `entry_workflow` set and no "
-                    "workflow named 'default' to fall back to."
-                )
-        elif self.entry_workflow not in self.workflows:
-            raise ValueError(f"entry_workflow '{self.entry_workflow}' is not defined under `workflows:`.")
         return self
 
     @model_validator(mode="after")
@@ -186,24 +146,7 @@ class Config(BaseModel):
                 if peer == agent_name:
                     raise ValueError(f"Agent '{agent_name}' cannot list itself as a peer.")
 
-        for wf_name, wf_cfg in self.workflows.items():
-            for step in wf_cfg.steps:
-                if step.agent not in agent_names:
-                    raise ValueError(
-                        f"Workflow '{wf_name}' references unknown agent '{step.agent}'. "
-                        f"Known agents: {sorted(agent_names)}"
-                    )
-                if step.next != "end" and step.next not in agent_names:
-                    raise ValueError(
-                        f"Workflow '{wf_name}' step '{step.agent}' points to unknown "
-                        f"next '{step.next}' (must be an agent name or 'end')."
-                    )
         return self
-
-    @property
-    def entry_agent(self) -> str:
-        return self.workflows[self.entry_workflow].entry_agent
-
 
 # ---------------------------------------------------------------------------
 # Loader

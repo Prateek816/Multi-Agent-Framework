@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 from datetime import datetime, timezone
-from langchain.agents import Tool
+from langchain_core.tools import Tool
 from typing import Dict, Any
 
 

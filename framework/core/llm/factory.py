@@ -231,6 +231,8 @@ _BUILDERS["openai_compatible"] = _build_openai_compatible
 # Public factory
 # ---------------------------------------------------------------------------
 
+def 
+
 def get_llm(
     provider: Provider | None = None,
     model: str | None = None,

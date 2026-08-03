@@ -2,51 +2,24 @@
 framework/agents/factory.py
 
 Something has to turn a validated `AgentConfig` into a live, constructed
-`BaseAgent` -- resolving `llm: "gemini"` into an actual client, `tools:
-[...]` into actual `Tool` objects, etc. Without a dedicated factory, that
-resolution logic would leak into whichever code creates agents (likely the
-Orchestrator), giving it a second, unrelated reason to change.
+`BaseAgent` -- but as of `base.py`, that resolution work (llm client,
+memory manager, RAG, skills) happens *inside* `BaseAgent.__init__`,
+driven entirely off the fields on `AgentConfig` itself. `AgentFactory`
+no longer owns any of that resolution; the only thing it still supplies
+that `AgentConfig` doesn't already carry is which `BaseAgent` subclass to
+instantiate for a given `agent_config.type`.
 
 `AgentFactory` deliberately does NOT register agents anywhere. `build()`
 and `build_all()` return constructed agents; they don't add them to
 `AgentRegistry`. That's the caller's job, so this module has no side
 effects on global state -- agent construction and agent registration stay
 two separate concerns.
-
-Known inconsistency: `AgentConfig` is imported below from
-`framework.config.schema`, but as of this writing it actually lives in
-`config_loader.py`. Left as-is per the source design doc; update the
-import once `AgentConfig`'s real home is settled.
 """
 
 from typing import Protocol
 
 from framework.agent.base import BaseAgent
-from framework.config.schema import AgentConfig
-
-
-class LLMRegistry(Protocol):
-    """Typing contract only. Resolves a config-level LLM name to a live client."""
-
-    def get(self, name: str) -> object:
-        """Return the constructed LLM client registered under `name`."""
-        ...
-
-
-class ToolRegistry(Protocol):
-    """Typing contract only. Resolves config-level tool names to live Tool objects."""
-
-    def resolve_many(self, names: list[str]) -> list[object]:
-        """Return the `Tool` objects registered under each of `names`, in order."""
-        ...
-
-
-class MemoryManager(Protocol):
-    """Typing contract only. Hands out a memory scope for a given agent."""
-
-    def scope_for(self, agent_name: str) -> object:
-        """Return the memory object/scope this agent should use."""
-        ...
+from config_loader import AgentConfig
 
 
 class PluginLoader(Protocol):
@@ -61,43 +34,32 @@ class AgentFactory:
     """
     Turns validated `AgentConfig` objects into live `BaseAgent` instances.
 
-    Pure constructor injection: this class builds nothing itself at
-    __init__ time, it just holds the four resolvers it needs at `build()`
-    time.
+    `BaseAgent.__init__` builds its own llm client, memory manager, RAG,
+    and skill registry straight from the `AgentConfig` it's handed, so the
+    only thing this factory still resolves externally is the agent
+    *class* itself, via `plugin_loader`. That's the one dependency it
+    holds.
     """
 
     def __init__(
         self,
-        llm_registry: LLMRegistry,
-        tool_registry: ToolRegistry,
-        memory_manager: MemoryManager,
         plugin_loader: PluginLoader,
     ) -> None:
-        self.llm_registry = llm_registry
-        self.tool_registry = tool_registry
-        self.memory_manager = memory_manager
         self.plugin_loader = plugin_loader
 
     def build(self, agent_config: AgentConfig) -> BaseAgent:
         """
-        Resolve `llm`, `tools`, and `memory` for a single agent config, look
-        up the agent class via the plugin loader, and construct it through
-        `from_config` (not `__init__` directly -- see base.py for why: it
-        lets a custom agent subclass override how it pulls extra fields out
-        of `agent_config.extra` without every other agent needing to
-        implement construction logic itself).
+        Look up the agent class registered for `agent_config.type` via the
+        plugin loader, then construct it through `from_config` (not
+        `__init__` directly -- see base.py for why: it lets a custom agent
+        subclass override how it pulls extra fields out of
+        `agent_config.extra` without every other agent needing to
+        implement construction logic itself). `from_config` takes only the
+        config; `BaseAgent.__init__` handles the rest of the resolution
+        (llm, memory, RAG, skills) from `agent_config`'s own fields.
         """
-        llm = self.llm_registry.get(agent_config.llm)
-        tools = self.tool_registry.resolve_many(agent_config.tools)
-        memory = self.memory_manager.scope_for(agent_config.name)
         agent_cls = self.plugin_loader.resolve(agent_config.type)
-
-        return agent_cls.from_config(
-            agent_config,
-            llm=llm,
-            tools=tools,
-            memory=memory,
-        )
+        return agent_cls.from_config(agent_config)
 
     def build_all(self, agent_configs: list[AgentConfig]) -> dict[str, BaseAgent]:
         """

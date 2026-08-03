@@ -15,6 +15,11 @@ internal framework imports, so nothing forces an A2A SDK import
 transitively through it. A future `A2AExecutorAdapter` is meant to wrap a
 `BaseAgent` instance from the outside, translating A2A's types at the
 boundary -- this file stays ignorant of that entirely.
+
+`run()` delegates the model <-> tool loop to `create_agent`, which builds
+a prebuilt (LangGraph-style) tool-calling agent. That means this class no
+longer hand-rolls its own invoke/dispatch loop -- there is nothing here
+equivalent to a `_chat_impl` / `_run_tool_loop` pair anymore.
 """
 
 from abc import ABC, abstractmethod
@@ -24,7 +29,7 @@ import uuid
 
 import logging
 
-from core.llm import get_llm , LLMConfig
+from core.llm import get_llm, LLMConfig
 from core.memory.manager import MemoryManager
 from core.RAG.rag import KnowledgeRAG
 from core.skills import SkillRegistry
@@ -34,18 +39,13 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
-    ToolMessage
+    ToolMessage,
 )
-
-"""from core.compaction import (
-    DEFAULT_AUTO_THRESHOLD_TOKENS,
-    DEFAULT_RECENT_KEEP,
-    compact,
-    estimate_tokens,
-    memory_flush,
-)"""
+from config_loader import AgentConfig
+from langchain_agent.agent import create_agent
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Task:
@@ -81,108 +81,100 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        name: str,
+        config:AgentConfig,
     ) -> None:
-        self.agent_name = name
-        
-        self.llm = get_llm(agent_name = self.agent_name)
-        self.memory = MemoryManager(agent_name = self.agent_name)
-        self.RAG = KnowledgeRAG(agent_name = self.agent_name)
-        self.skills = SkillRegistry(agent_name = self.agent_name)
+        self.agent_name = config.name
+        self.llm = get_llm(LLMConfig(config.llm))
+        self.memory = MemoryManager(MemoryConfig = config.memory)
+        self.RAG = KnowledgeRAG(knowledge_dir = config.knowledge_directory)
+        self.skills = SkillRegistry(skills_dirs= config.skills_directory)
 
     @classmethod
     def from_config(
         cls,
-        agent_config: Any,
-        llm: Any,
-        tools: Optional[List[Any]] = None,
-        memory: Any = None,
+        config:AgentConfig
     ) -> "BaseAgent":
         """
         Construction path used by `AgentFactory`.
         """
         return cls(
-            name=agent_config.name,
+            config = config
         )
 
-    def _get_mcp_provider(self):
-        """Lazy-initialize and return the MCP tool provider, or None."""
-        if hasattr(self, '_mcp_provider'):
-            return self._mcp_provider
+    def run(self, task: Task) -> AgentResult:
+        """Execute the agent against a task and return a structured result.
 
-        mcp_enabled = bool(_cfg.get("mcp", "servers"))
-        if not mcp_enabled:
-            self._mcp_provider = None
-            return None
+        `create_agent` owns the model <-> tool loop (binding tools,
+        invoking the LLM, dispatching tool calls, feeding results back)
+        internally, so this method's job is just: assemble the pieces
+        (system prompt, tools, messages), hand them to the agent, and
+        translate its output into an `AgentResult`.
+        """
+        if not getattr(self, "_system_prompt", None):
+            self._init_system_prompt()
+
+        tools = self._build_tools()
+
+        agent = create_agent(
+            llm=self.llm,
+            tools=tools,
+            system_prompt=self._system_prompt,
+        )
+
+        messages = self._build_messages(task)
 
         try:
-            from core.mcp.integration import MCPToolProvider
-            provider = MCPToolProvider()
-            provider.initialize()
-            self._mcp_provider = provider
-            if self.verbose:
-                logger.info(
-                    "[Agent] MCP initialized with %d server(s)",
-                    len(provider._connected_servers),
-                )
-            return provider
+            result = agent.invoke({"messages": messages})
         except Exception as exc:
-            logger.warning("[Agent] MCP initialization failed: %s", exc)
-            self._mcp_provider = None
-            return None
+            logger.exception(
+                "Agent '%s' failed on task %s", self.agent_name, task.id
+            )
+            return AgentResult(output=None, error=str(exc))
 
-    
-    def init_system_prompt(self) -> None:
+        out_messages: List[BaseMessage] = result.get("messages", [])
+        final = out_messages[-1] if out_messages else None
+        output = (final.content if final else "") or ""
+
+        return AgentResult(
+            output=output,
+            tool_calls=self._extract_tool_calls(out_messages),
+            usage=self._extract_usage(out_messages),
+        )
+
+    def _init_system_prompt(self) -> None:
         """Build the system prompt from indentity layers + skills + memory"""
 
-        parts : list[str] = []
+        parts: list[str] = []
         skill_catalog = self.skills.build_catalog()
-        
+
         if skill_catalog:
             parts.append(f"## Available Skills\n\n{skill_catalog}")
             logger.info(
-                "Skills injected into prompt: """
+                "Skills injected into prompt: %d chars", len(skill_catalog)
             )
         else:
-            logger.info("No skills to inject (dirs=%s)", self.skills_dirs)
+            logger.info("No skills to inject (dirs=%s)", self.skills.skills_dirs)
 
         if self.RAG:
             parts.append(
                 "You have access to a knowledge base. Use the retrieve_knowledge tool "
                 "to search it when the user's question may be answered by stored documents."
             )
-        
+
         boot_ctx = self.memory.boot_context(max_chars=3000)
         if boot_ctx:
             parts.append(f"## What You Remember\n\n{boot_ctx}")
 
         self._system_prompt = "\n\n---\n\n".join(parts)
 
-        
         logger.debug("System prompt: %d chars", len(self._system_prompt))
 
     def _build_tools(self) -> list:
         """Build the LangChain tool list with runtime bindings."""
         from langchain_core.tools import StructuredTool
-        from core.tool.langtools import (
-            primitive_tools,
-            web_search_tool,
-        )
-        # Exclude lc_send_file from primitive_tools — we build it per-session below
-        tools = [t for t in primitive_tools if t.name != "lc_send_file"]
-
-        # send_file — bound to this agent's channel-specific file sender
-        def _send_file(path: str, caption: str = "") -> str:
-            """Send a file to the user via the active channel."""
-            from core.tool.tools import send_file as _send_file_impl
-            return _send_file_impl(path, caption, sender=self._file_sender)
-
-        tools.append(StructuredTool.from_function(
-            func=_send_file, name="lc_send_file",
-            description="Send a file to the user via the active channel. Max 100 MB.",
-        ))
-
-    
+        
+        tools = []
+        
         # Memory tools — bound to this agent's memory manager
         memory_defs = [
             ("remember", "Store a fact in long-term memory."),
@@ -200,8 +192,8 @@ class BaseAgent(ABC):
 
         # Skill tools — bound to this agent's skill registry
         skill_defs = [
-            ("lc_use_skill", "Load and use a skill by name."),
-            ("lc_list_skill_resources", "List resource files for a skill."),
+            ("use_skill", "Load and use a skill by name."),
+            ("list_skill_resources", "List resource files for a skill."),
         ]
         for name, desc in skill_defs:
             handler = self._make_skill_handler(name)
@@ -285,7 +277,78 @@ class BaseAgent(ABC):
         }
         return handlers.get(tool_name, lambda **_: f"Unknown skill tool: {tool_name}")
 
-    def run(self, task: Task) -> AgentResult:
-        
+    def _build_messages(self, task: Task) -> list[BaseMessage]:
+        """Build the conversation messages for this task.
 
-    
+        The system prompt is *not* included here — it's passed to
+        `create_agent` directly as `system_prompt`, since the agent owns
+        prepending it on every internal loop iteration. History comes from
+        `task.context`, not instance state, since a `BaseAgent` is meant to
+        be reusable across tasks/runs rather than keep its own chat log.
+        """
+        msgs: list[BaseMessage] = []
+
+        history = task.context.get("messages", [])
+        for m in history:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "user":
+                msgs.append(HumanMessage(content=content))
+            elif role == "assistant":
+                msgs.append(AIMessage(content=content))
+
+        # Current input — may be a plain string or multimodal content list
+        msgs.append(HumanMessage(content=task.input))
+
+        return msgs
+
+    @staticmethod
+    def _extract_tool_calls(messages: List[BaseMessage]) -> List[Dict[str, Any]]:
+        """Pull every tool call issued during the agent's run out of its
+        final message list, in order."""
+        calls: List[Dict[str, Any]] = []
+        for m in messages:
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                calls.extend(m.tool_calls)
+        return calls
+
+    @staticmethod
+    def _extract_usage(messages: List[BaseMessage]) -> Dict[str, Any]:
+        """Sum per-message `usage_metadata` (if the provider populates it)
+        across every model call the agent made during its run."""
+        totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        seen = False
+        for m in messages:
+            meta = getattr(m, "usage_metadata", None)
+            if not meta:
+                continue
+            seen = True
+            for k in totals:
+                totals[k] += meta.get(k, 0) or 0
+        return totals if seen else {}
+
+    def _get_mcp_provider(self):
+        """Lazy-initialize and return the MCP tool provider, or None."""
+        if hasattr(self, '_mcp_provider'):
+            return self._mcp_provider
+
+        mcp_enabled = bool(_cfg.get("mcp", "servers"))
+        if not mcp_enabled:
+            self._mcp_provider = None
+            return None
+
+        try:
+            from core.mcp.integration import MCPToolProvider
+            provider = MCPToolProvider()
+            provider.initialize()
+            self._mcp_provider = provider
+            if self.verbose:
+                logger.info(
+                    "[Agent] MCP initialized with %d server(s)",
+                    len(provider._connected_servers),
+                )
+            return provider
+        except Exception as exc:
+            logger.warning("[Agent] MCP initialization failed: %s", exc)
+            self._mcp_provider = None
+            return None

@@ -87,6 +87,7 @@ class LLMConfig:
         Use sparingly — prefer first-class fields for things you rely on.
     """
 
+    agent_name:str
     provider: Provider
     model: str
     temperature: float = 0.7
